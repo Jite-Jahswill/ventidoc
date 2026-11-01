@@ -8,10 +8,21 @@
   "scripts": {
     "lint": "eslint --config ../../eslint.config.mjs .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "node --env-file-if-exists=../../.env node_modules/vitest/vitest.mjs run",
+    "db:generate": "node --env-file-if-exists=../../.env node_modules/drizzle-kit/bin.cjs generate",
+    "db:migrate": "node --env-file-if-exists=../../.env node_modules/drizzle-kit/bin.cjs migrate",
+    "db:seed": "node --env-file-if-exists=../../.env node_modules/tsx/dist/cli.mjs src/seed.ts",
+    "db:reset": "node --env-file-if-exists=../../.env node_modules/tsx/dist/cli.mjs src/reset.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.4",
+    "postgres": "4.0.0",
+    "uuidv7": "1.2.1"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "drizzle-kit": "0.31.11",
+    "tsx": "4.23.15",
     "typescript": "5.9.3",
     "vitest": "5.0.5"
   }

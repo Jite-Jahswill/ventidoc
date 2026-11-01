@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ventidoc
       POSTGRES_DB: ventidoc
     ports:
-      - '5432:5432'
+      - '5433:5432'
     volumes:
       - ventidoc-postgres-data:/var/lib/postgresql/data
       - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro

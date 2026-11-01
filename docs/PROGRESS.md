@@ -175,11 +175,41 @@ typescript-eslint versions` and there is no newer major that supports TS 7 yet.
 
 ### Known issues / TODOs (carried over or new)
 
-- Docker Compose still validated via `docker compose config` only — no Docker daemon in this
-  environment. `pnpm db:up` + the Mailpit UI check at `localhost:8025` are follow-ups for you
-  to run locally.
 - ESLint 9.39.5 remains past its own upstream support window; still the newest version
   compatible with the rest of the pinned chain. Revisit once `eslint-config-next`'s
   transitive deps catch up to ESLint 10+.
 - CI has not run on GitHub yet for the pushed branch — confirm it's green there before
   merging to `main`.
+
+## Stage 0.1 follow-up — local Docker verification
+
+**Status:** done. `pnpm db:up` verified end-to-end on the developer's machine.
+
+### What was found and fixed
+
+- `pnpm db:up` initially failed: `ports are not available: exposing port TCP
+0.0.0.0:5432 -> 127.0.0.1:0: ... address already in use`. Root cause: a **native**
+  PostgreSQL 18 install (`/Library/PostgreSQL/18/bin/postgres`, not Docker) was already
+  bound to host port 5432. Rather than touching that unrelated, already-running service,
+  remapped this project's Postgres container to host port **5433** instead (container-internal
+  port stays 5432, unaffected). Updated `docker-compose.yml`'s port mapping and
+  `DATABASE_URL`/`DATABASE_URL_TEST` in `.env.example` to point at `localhost:5433`. The CI
+  workflow's own Postgres service container is unaffected — it runs in an isolated GitHub
+  Actions VM on port 5432 with no such conflict.
+- **Heads up, not fixed**: `docker compose up` reported orphan containers
+  `ventidoc-objectstore-1`, `ventidoc-clamav-1`, `ventidoc-redis-1` — an unrelated, already-running
+  Compose project on this machine also uses the project name `ventidoc` (Docker Compose
+  derives the project name from the directory name by default, so a different, unrelated
+  `ventidoc` folder or an older project is colliding on the name). Left untouched since they
+  looked like separate, active infrastructure (seaweedfs/clamav/redis) that may still be in
+  use; if this project should run its own isolated Compose namespace, add a `name:` key to
+  `docker-compose.yml` (e.g. `name: ventidoc-stage0`) in a later stage.
+
+### Verified locally
+
+- `pnpm db:up` → Postgres and Mailpit containers both report `healthy`.
+- Postgres accepts connections on `localhost:5433` (`psql`/`SELECT 1` succeeded inside the
+  container); the `ventidoc_test` database was created automatically by the init script.
+- Mailpit's web UI responds `HTTP 200` at `http://localhost:8025` (API reports
+  `"Version":"v1.33.0"`, matching the pinned image, 0 messages as expected with no emails
+  sent yet).

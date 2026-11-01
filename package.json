@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "packageManager": "pnpm@10.34.6",
   "scripts": {
@@ -28,6 +28,6 @@
     "turbo": "2.11.10",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1",
-    "vitest": "4.1.12"
+    "vitest": "5.0.5"
   }
 }

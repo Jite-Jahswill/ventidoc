@@ -90,7 +90,7 @@
 ### Running it locally
 
 ```bash
-nvm use                 # Node 20
+nvm use                 # Node 24
 corepack enable          # gives you the pinned pnpm version
 pnpm install
 
@@ -110,3 +110,76 @@ pnpm format               # or: pnpm format:check
 
 pnpm db:down              # stop the local services
 ```
+
+## Stage 0.1 — Node 24 LTS, dependency re-check, git remote, repo hygiene
+
+**Status:** done. Full suite re-run green (lint, typecheck, unit tests, build, e2e).
+
+### What changed
+
+- **Node 20 → Node 24 LTS.** Node 20 is end-of-life; Node 24 is the current Active LTS line.
+  Updated `.nvmrc` (`24`), `package.json#engines.node` (`24.x`), and
+  `.github/workflows/ci.yml`'s `actions/setup-node` `node-version` (`24`).
+- **`@types/node` 20.19.43 → 24.19.2** in every package, to match the new Node target.
+- **Vitest 4.1.12 → 5.0.5.** Vitest 5 requires `@types/node@^22.0.0 || >=24.0.0`; that's now
+  satisfied by the `@types/node` bump above, so upgraded to the newest Vitest release across
+  every package. All 13 unit tests still pass unchanged.
+- **TypeScript stays at 5.9.3** (did not upgrade to 7.0.2). `typescript-eslint@8.72.1` — still
+  the newest release — only supports `typescript@>=4.8.4 <6.1.0`; this is independent of the
+  Node version, so the constraint from Stage 0 still applies. Re-checked `npm view
+typescript-eslint versions` and there is no newer major that supports TS 7 yet.
+- **ESLint stays at 9.39.5** (did not upgrade to 10.14.0), for the same reason recorded in
+  Stage 0: `eslint-config-next@16.4.3`'s transitive deps (`eslint-plugin-import`,
+  `eslint-plugin-react`, `eslint-plugin-jsx-a11y`) still only declare peer support up to
+  ESLint 9; no new release of any of them has shipped since Stage 0.
+- **Git remote added**: `origin` → `https://github.com/Jite-Jahswill/ventidoc.git`. Branch
+  `stage-0-tooling` pushed. `main` was **not** touched — no merge, no tag, nothing pushed to
+  `main`, per the standing rule in `CLAUDE.md`.
+- **Repo hygiene**: removed `apps/web/tsconfig.tsbuildinfo`, a TypeScript incremental-build
+  cache file that had been accidentally committed in Stage 0 (harmless content — no secrets
+  — but it's a build artifact, not source). Added `*.tsbuildinfo` to `.gitignore` so it can't
+  happen again.
+- **`.gitignore` audit**: confirmed `.env`, `.env.local`, `.env.*.local`, `node_modules/`,
+  `.next/`, `playwright-report/`, `test-results/` and `coverage/` are all ignored, at both
+  the repo root and inside `apps/web` (verified with `git check-ignore -v` against real
+  paths in each package).
+- **Secret scan**: `git log --all -p` across every commit and every file ever committed,
+  grepped for API keys, passwords, tokens and private-key headers. No findings — the only
+  hits are the literal variable names (`RESEND_API_KEY`, etc.) in source/docs and the
+  intentionally-hardcoded local-only `ventidoc`/`ventidoc` Postgres dev credentials in
+  `docker-compose.yml` and `.github/workflows/ci.yml`, which are not real secrets (local
+  Docker container only, never used outside this machine/CI run).
+
+### Final versions
+
+| Tool         | Version    |
+| ------------ | ---------- |
+| Node         | 24.x (LTS) |
+| TypeScript   | 5.9.3      |
+| Vitest       | 5.0.5      |
+| ESLint       | 9.39.5     |
+| Next.js      | 16.4.3     |
+| React        | 19.3.1     |
+| Tailwind CSS | 4.3.3      |
+| Playwright   | 1.64.1     |
+| Turborepo    | 2.11.10    |
+| pnpm         | 10.34.6    |
+
+### Check results (re-run after all of the above)
+
+- `pnpm lint` → **9/9 packages pass**, 0 errors/warnings
+- `pnpm typecheck` → **9/9 pass**
+- `pnpm test` → **9/9 suites pass, 13/13 tests pass**
+- `pnpm build` → **pass** (7 static routes + 1 dynamic API route)
+- `pnpm test:e2e` → **2/2 Playwright tests pass**
+
+### Known issues / TODOs (carried over or new)
+
+- Docker Compose still validated via `docker compose config` only — no Docker daemon in this
+  environment. `pnpm db:up` + the Mailpit UI check at `localhost:8025` are follow-ups for you
+  to run locally.
+- ESLint 9.39.5 remains past its own upstream support window; still the newest version
+  compatible with the rest of the pinned chain. Revisit once `eslint-config-next`'s
+  transitive deps catch up to ESLint 10+.
+- CI has not run on GitHub yet for the pushed branch — confirm it's green there before
+  merging to `main`.

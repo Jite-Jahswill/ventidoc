@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:16.15
+    container_name: ventidoc-postgres
+    environment:
+      POSTGRES_USER: ventidoc
+      POSTGRES_PASSWORD: ventidoc
+      POSTGRES_DB: ventidoc
+    ports:
+      - '5432:5432'
+    volumes:
+      - ventidoc-postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ventidoc']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:v1.33.0
+    container_name: ventidoc-mailpit
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+
+volumes:
+  ventidoc-postgres-data:

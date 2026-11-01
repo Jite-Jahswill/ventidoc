@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  DATABASE_URL: postgresql://ventidoc:ventidoc@localhost:5432/ventidoc
+  DATABASE_URL_TEST: postgresql://ventidoc:ventidoc@localhost:5432/ventidoc_test
+  APP_URL: http://localhost:3000
+  EMAIL_PROVIDER: smtp
+  SMTP_HOST: localhost
+  SMTP_PORT: '1025'
+  SMTP_SECURE: 'false'
+  EMAIL_FROM: 'Ventidoc <no-reply@ventidoc.local>'
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16.15
+        env:
+          POSTGRES_USER: ventidoc
+          POSTGRES_PASSWORD: ventidoc
+          POSTGRES_DB: ventidoc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ventidoc"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.6
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Create test database
+        run: PGPASSWORD=ventidoc psql -h localhost -U ventidoc -d ventidoc -c "CREATE DATABASE ventidoc_test;"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright browsers
+        run: pnpm --filter web exec playwright install --with-deps chromium
+
+      - name: E2E tests
+        run: pnpm test:e2e

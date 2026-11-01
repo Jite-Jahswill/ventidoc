@@ -11,6 +11,8 @@ const envSchema = z
   .object({
     DATABASE_URL: z.url(),
     DATABASE_URL_TEST: z.url(),
+    DATABASE_MIGRATION_URL: z.url(),
+    DATABASE_MIGRATION_URL_TEST: z.url(),
     APP_URL: z.url(),
     EMAIL_PROVIDER: z.enum(['smtp', 'resend']).default('smtp'),
     SMTP_HOST: z.string().min(1).optional(),

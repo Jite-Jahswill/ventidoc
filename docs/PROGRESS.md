@@ -619,6 +619,28 @@ rather than reusing a tool (`withSystem()`) built for migrations/seeds/tests. `w
   (`Welcome`'s app name, `BusinessInvite`'s inviter/business name, `GenericNotification`'s own
   `title`). A later stage can add an explicit `subject` override if a caller ever needs one.
 
+### Third CI-only bug found and fixed: `packages/emails` had no test-DB remap
+
+Opening the PR for this branch surfaced another real gap, the same way Stage 1's two did:
+`packages/emails`'s tests failed in CI with `relation "users" does not exist`. `@ventidoc/db`'s
+`withTenant()`/`withSystem()`/`withPlatform()` read `DATABASE_URL`/`DATABASE_MIGRATION_URL`
+directly (`packages/db/src/client.ts`) — `packages/db`'s own `vitest.setup.ts` remaps those to the
+`_TEST` variants before its suite runs, but `packages/emails` had no such file, so its tests were
+quietly hitting the **dev** `ventidoc` database the whole time, not `ventidoc_test`. Confirmed by
+checking row counts directly: 36 stray rows had accumulated in dev's `email_logs`, 6 (correctly)
+in test's. Locally this looked fine because the dev database happened to already be migrated (from
+earlier manual `db:reset` runs); CI's dev database is never migrated at all (only
+`@ventidoc/db`'s globalSetup migrates the _test_ one), so the gap was invisible until CI ran this
+specific package's suite for the first time.
+
+Fix: added `packages/emails/vitest.setup.ts`, identical in spirit to `packages/db`'s — remaps
+`DATABASE_URL`/`DATABASE_MIGRATION_URL` to the `_TEST` pair, since each package's tests run in a
+separate process and the remap doesn't carry over from `@ventidoc/db`'s suite even though
+`turbo.json`'s `dependsOn` runs it first. Verified properly this time, not just locally: reset the
+dev database, ran the full suite (rows landed in `ventidoc_test`, not `ventidoc`), then **dropped
+the dev database's entire schema** to exactly mirror CI's never-migrated state and reran
+`pnpm test` from the root — 9/9 suites still pass against a completely empty dev database.
+
 ### Known issues / TODOs
 
 - `@react-email/components` (and its constituent per-component packages, e.g. `@react-email/text`,

@@ -419,3 +419,14 @@ file, so it depends entirely on Turborepo actually passing these vars through to
 
 Fix: declare the four `DATABASE_*` vars under `tasks.test.env` in `turbo.json`. Confirmed fixed
 with the same no-`.env`-file repro.
+
+Stage 1 PR merged into `main`, tagged `stage-1`.
+
+## Stage 1 gap closed before Stage 2: missing tenant_id/FK indexes
+
+Stage 1's requirement to "add indexes on every tenant_id and foreign key" was only partly met —
+only `tenant_members`'s composite unique index existed. Added single-column indexes on
+`tenants.owner_user_id`, `shops.tenant_id`, `tenant_members.user_id`, `audit_logs.tenant_id`, and
+`audit_logs.actor_user_id` (migration `0002_add_missing_tenant_fk_indexes.sql`, drizzle-kit
+generated). Fixed as its own commit, separate from Stage 2 feature work, since it's closing a gap
+in an already-tagged stage rather than new scope.

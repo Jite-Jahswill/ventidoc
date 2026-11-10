@@ -11,6 +11,13 @@ import { afterAll, describe, expect, it } from 'vitest';
 describe('app.tenant_id does not leak across a reused pooled connection', () => {
   const sql = postgres(process.env.DATABASE_URL_TEST!, { max: 1 });
 
+  // Postgres custom GUCs read as NULL via current_setting(name, true) only
+  // until they've been touched in the session; after a transaction-local
+  // set_config(..., true) reverts, they read back as '' (empty string), not
+  // NULL again. That's exactly why the RLS policies normalise with
+  // NULLIF(current_setting(...), '') — both mean "no tenant context".
+  const isUnset = (value: unknown) => value === null || value === '';
+
   afterAll(async () => {
     await sql.end();
   });
@@ -18,13 +25,6 @@ describe('app.tenant_id does not leak across a reused pooled connection', () => 
   it('resets to unset between transactions on the same connection', async () => {
     const tenantA = '11111111-1111-7111-8111-111111111111';
     const tenantB = '22222222-2222-7222-8222-222222222222';
-
-    // Postgres custom GUCs read as NULL via current_setting(name, true) only
-    // until they've been touched in the session; after a transaction-local
-    // set_config(..., true) reverts, they read back as '' (empty string),
-    // not NULL again. That's exactly why the RLS policies normalise with
-    // NULLIF(current_setting(...), '') — both mean "no tenant context".
-    const isUnset = (value: unknown) => value === null || value === '';
 
     const before = await sql.begin(async (tx) => {
       return tx`select current_setting('app.tenant_id', true) as setting, pg_backend_pid() as pid`;
@@ -58,5 +58,29 @@ describe('app.tenant_id does not leak across a reused pooled connection', () => 
     // just five independent, never-set sessions.
     const pids = [before, afterA, betweenAandB, afterB, afterNoContext].map((r) => r[0]?.pid);
     expect(new Set(pids).size).toBe(1);
+  });
+
+  it('resets to unset after a transaction rolls back (callback throws), not just on commit', async () => {
+    const tenantId = '33333333-3333-7333-8333-333333333333';
+
+    const setPid = await sql.begin(async (tx) => {
+      await tx`select set_config('app.tenant_id', ${tenantId}, true)`;
+      return tx`select pg_backend_pid() as pid`;
+    });
+
+    await expect(
+      sql.begin(async (tx) => {
+        await tx`select set_config('app.tenant_id', ${tenantId}, true)`;
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+
+    const after = await sql.begin(async (tx) => {
+      return tx`select current_setting('app.tenant_id', true) as setting, pg_backend_pid() as pid`;
+    });
+
+    expect(isUnset(after[0]?.setting)).toBe(true);
+    // Same physical connection throughout (max: 1), so this is a real leak test.
+    expect(after[0]?.pid).toBe(setPid[0]?.pid);
   });
 });

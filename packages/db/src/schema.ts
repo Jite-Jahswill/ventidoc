@@ -1,5 +1,6 @@
 import {
   index,
+  integer,
   jsonb,
   pgTable,
   text,
@@ -109,4 +110,32 @@ export const auditLogs = pgTable(
   ],
 );
 
-export const schema = { users, tenants, shops, tenantMembers, auditLogs };
+/**
+ * One row per email send attempt. tenant_id is nullable for platform-level
+ * emails (e.g. a platform-admin notification with no owning tenant). The app
+ * role can INSERT a platform row but can never SELECT/UPDATE/DELETE it
+ * afterwards — see migration 0004 and `withPlatform()` in with-tenant.ts.
+ */
+export const emailLogs = pgTable(
+  'email_logs',
+  {
+    id: uuid('id').primaryKey().$defaultFn(uuidv7),
+    tenantId: uuid('tenant_id').references(() => tenants.id),
+    template: text('template').notNull(),
+    recipient: text('recipient').notNull(),
+    provider: varchar('provider', { length: 32 }).notNull(),
+    status: varchar('status', { length: 32 }).notNull().default('queued'),
+    attempts: integer('attempts').notNull().default(0),
+    messageId: text('message_id'),
+    errorSummary: text('error_summary'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('email_logs_tenant_id_idx').on(table.tenantId),
+    index('email_logs_status_idx').on(table.status),
+    index('email_logs_created_at_idx').on(table.createdAt),
+  ],
+);
+
+export const schema = { users, tenants, shops, tenantMembers, auditLogs, emailLogs };

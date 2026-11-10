@@ -430,3 +430,205 @@ only `tenant_members`'s composite unique index existed. Added single-column inde
 `audit_logs.actor_user_id` (migration `0002_add_missing_tenant_fk_indexes.sql`, drizzle-kit
 generated). Fixed as its own commit, separate from Stage 2 feature work, since it's closing a gap
 in an already-tagged stage rather than new scope.
+
+## Stage 2 — Email service (SMTP default, Resend optional)
+
+**Status:** done. Full suite green (lint, typecheck, unit tests, build, e2e).
+
+### Summary
+
+`packages/emails` exports an `EmailProvider` interface (`send(options) -> { provider, messageId }`)
+with three implementations — `SmtpProvider` (Nodemailer, pooled transport, connection/greeting/
+socket timeouts), `ResendProvider` (the official `resend` SDK), and `MemoryProvider` (in-memory,
+tests only) — plus `resolveEmailProvider(tenantId?)`, five React Email templates rendered to both
+HTML and plain text, and a `sendEmail()`/`enqueueEmail()` service that renders, sends, retries
+transient failures, and logs every attempt to a new `email_logs` table. `packages/db` gained that
+table, a `withPlatform()` helper, and a narrowly-scoped SECURITY DEFINER function for marking a
+platform email's status — see the "RLS" section below.
+
+### Provider design
+
+- **`EmailProvider`** (`src/types.ts`): `send({ to, from, replyTo?, subject, html, text, headers?,
+  tags? }) -> Promise<{ provider, messageId }>`. Every implementation runs
+  `assertValidSendOptions()` (`src/security.ts`) first — a zod schema that rejects a bare CR or LF
+  anywhere in `to`/`from`/`replyTo`/`subject`/header values (SMTP header injection) and validates
+  address format (bare `email@example.com` or `"Name <email@example.com>"`).
+- **`SmtpProvider`** (`src/providers/smtp.ts`): Nodemailer with `pool: true` and explicit
+  `connectionTimeout`/`greetingTimeout`/`socketTimeout` (10s/10s/20s). Maps a connection-level
+  failure (`ETIMEDOUT`/`ECONNREFUSED`/etc.) or a 4xx SMTP response to `EmailSendError(kind:
+  'transient')`; everything else (including a 5xx permanent failure) is `kind: 'other'`.
+- **`ResendProvider`** (`src/providers/resend.ts`): the official `resend` SDK. Maps
+  `rate_limit_exceeded`/`internal_server_error`/`application_error` to `'transient'`,
+  `validation_error`/`invalid_from_address`/`missing_required_field` to `'invalid-address'`,
+  everything else to `'other'`.
+- **`MemoryProvider`** (`src/providers/memory.ts`): stores every sent message in an array for
+  assertions. Still runs `assertValidSendOptions()`, so tests exercise the same validation path as
+  production providers.
+- **`resolveEmailProvider(tenantId?)`** (`src/providers/factory.ts`): builds and caches one
+  "platform" provider from `EMAIL_PROVIDER`/`SMTP_*`/`RESEND_API_KEY` (via `@ventidoc/config`'s
+  `parseEnv()`, now a true `z.discriminatedUnion('EMAIL_PROVIDER', [smtp, resend])`). `tenantId` is
+  accepted and threaded through everywhere (`sendEmail`'s input, `resolveEmailProvider` itself) but
+  **not yet used** — every tenant shares the platform provider. Per-tenant SMTP settings are
+  explicitly out of scope for this stage; the factory function's own docstring is the documented
+  hook for where that lookup goes later.
+
+### Templates
+
+`BaseLayout` takes branding props (`appName`, `logoUrl`, `primaryColor`, `footerText`,
+`supportEmail`) with Ventidoc defaults (`DEFAULT_BRANDING`) — branding comes from the database in
+Stage 5, so every template falls back to these for now. Five templates, each a typed React
+component plus a `.PreviewProps` static for `react-email`'s preview server: `VerifyEmail`,
+`PasswordReset`, `Welcome`, `BusinessInvite`, `GenericNotification`. `renderTemplate(name, props)`
+(`src/render.ts`) renders a template to `{ subject, html, text }` via `@react-email/render`'s
+`render()` (HTML) and `render(..., { plainText: true })` (text) — one static `subjectFor()` switch
+maps each template name to its subject line. `pnpm email:dev` runs `react-email dev` against
+`src/templates` on port 3200.
+
+### `sendEmail()` / `enqueueEmail()`
+
+`sendEmail({ template, props, to, tenantId?, from?, replyTo?, headers?, tags? })`
+(`src/send-email.ts`):
+
+1. Generates a UUIDv7 `logId` and inserts a `queued` `email_logs` row (via `withTenant()` if
+   `tenantId` is given, `withPlatform()` otherwise).
+2. Renders the template.
+3. Calls the resolved provider's `send()`, retrying up to 3 attempts with exponential backoff
+   (50ms, 100ms) **only** when the thrown error is an `EmailSendError` with `kind: 'transient'`; an
+   `'invalid-address'` or `'other'` error (including a validation failure from step 2/the
+   provider's own `assertValidSendOptions()` call) fails immediately.
+4. Updates the `email_logs` row to `sent` or `failed` (attempts, message id, a short error summary
+   capped at 500 characters, `sent_at`).
+
+Every stage is wrapped so `sendEmail()` **never throws** — it always returns
+`{ ok, logId, error? }`, falling back to `{ ok: false, logId }` even if the initial log insert
+itself fails. `enqueueEmail()` is a one-line wrapper around `sendEmail()` and is the single call
+site application code is meant to use: a later stage can replace its body with "push a job onto a
+durable queue (BullMQ/pg-boss/etc.), return a logId immediately" without touching any call site,
+since every caller already goes through `enqueueEmail()`, not `sendEmail()` directly.
+
+### Database: `email_logs` and the platform-rows RLS pattern
+
+`email_logs` (`tenant_id` nullable, `template`, `recipient`, `provider`, `status`
+`queued|sent|failed`, `attempts`, `message_id`, `error_summary`, `created_at`, `sent_at`), indexed
+on `tenant_id`/`status`/`created_at` (migration `0003_email_logs.sql`, drizzle-kit generated).
+
+RLS (migration `0004_email_logs_rls_and_platform_rows.sql`, hand-written) splits into three
+policies instead of Stage 1's one `FOR ALL`, because INSERT and SELECT/UPDATE need different
+rules:
+
+- `email_logs_insert`: `WITH CHECK (tenant_id = <session tenant> OR tenant_id IS NULL)` — a
+  tenant-owned row needs a matching session, a **platform** row (`tenant_id IS NULL`) can always
+  be inserted regardless of session context.
+- `email_logs_select` / `email_logs_update`: `USING (tenant_id = <session tenant>)` only — this
+  structurally excludes platform rows (`NULL` never equals a session's tenant id, even when no
+  context is set), so `ventidoc_app` can insert a platform row and then **never read it back**.
+  Only `withSystem()` (`BYPASSRLS`) can.
+- Column-restricted grant: `GRANT UPDATE (status, attempts, message_id, error_summary, sent_at) ON
+  email_logs TO ventidoc_app` — `template`/`recipient`/`provider`/`tenant_id`/`created_at` are
+  immutable from the app role's side once a row exists.
+
+The same split-policy fix was applied to `audit_logs`, closing a **Stage 1 gap**: its single
+`FOR ALL` policy required `tenant_id` to match the session's tenant even for `INSERT`, so a
+platform event (`tenant_id IS NULL`) could never actually be written by the app role at all.
+
+**Reading a platform row's own status back**, to mark it sent/failed, needs an escape hatch since
+RLS now hides it from `ventidoc_app` by design. Two options were on the table:
+
+1. Route the update through `withSystem()` — simple, but `withSystem()` has unrestricted
+   read/write access to every table, which is a much bigger privilege than "update five columns on
+   one row I just created."
+2. A narrowly-scoped `SECURITY DEFINER` SQL function, `update_platform_email_log_status(id,
+   status, attempts, message_id, error_summary, sent_at)`, owned by `ventidoc_owner` (so it runs
+   with `BYPASSRLS` for its own body) but hard-coded to touch only those five columns, only on
+   `tenant_id IS NULL` rows, by `id`. `EXECUTE` is granted to `ventidoc_app`.
+
+**Chose option 2** — it keeps the escape hatch exactly as wide as the one operation that needs it,
+rather than reusing a tool (`withSystem()`) built for migrations/seeds/tests. `withPlatform()`
+(`packages/db/src/with-tenant.ts`) is the new counterpart to `withTenant()`: a transaction on the
+`ventidoc_app` connection with no `app.tenant_id` ever set, used only for inserting platform rows.
+`updatePlatformEmailLogStatus()` wraps a call to the SQL function. Both are exported from the main
+`@ventidoc/db` entry point, not `/system` — RLS is never bypassed by either, so they're safe for
+`apps/web`.
+
+### Switching providers / pointing at a real server
+
+- **To Resend in production:** set `EMAIL_PROVIDER=resend` and `RESEND_API_KEY=<your key>`;
+  `SMTP_*` variables are then ignored (the env schema doesn't even require them on that branch).
+  No code change — `resolveEmailProvider()` picks `ResendProvider` automatically.
+- **To a real SMTP provider:** set `EMAIL_PROVIDER=smtp` (or leave it unset — it's the default) and
+  point `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASS`/`SMTP_SECURE` at that provider instead of
+  Mailpit (e.g. `SMTP_SECURE=true` and port 465, or STARTTLS on 587 with `SMTP_SECURE=false`).
+
+### Tests
+
+- `src/__tests__/security.test.ts` (9): CRLF injection rejected in subject/to/from/replyTo/header
+  values; address format validation.
+- `src/__tests__/providers/memory.test.ts` (3): stores sent messages, unique message ids, runs the
+  same validation as every other provider.
+- `src/__tests__/providers/factory.test.ts` (5): picks `SmtpProvider`/`ResendProvider` by
+  `EMAIL_PROVIDER`, fails clearly when a required variable is missing, caches the platform
+  provider.
+- `src/__tests__/providers/resend.test.ts` (5): mocked `fetch` (no real key/network) — success,
+  error-name-to-`EmailSendError.kind` mapping (`transient`/`invalid-address`/`other`), CRLF
+  rejected before any network call.
+- `src/__tests__/providers/smtp-mailpit.test.ts` (1): **real** integration test against the local
+  Mailpit container — no mocking — polling Mailpit's own HTTP API for arrival, subject, recipient,
+  and both HTML and plain-text parts.
+- `src/__tests__/templates/templates.test.tsx` (8): each template renders HTML/text containing its
+  expected links/props; branding defaults apply when omitted; HTML snapshot per template.
+- `src/__tests__/send-email.test.ts` (6): success for a tenant row and a platform row; a
+  non-transient failure fails immediately (`ok:false`, `email_logs.status='failed'`,
+  `attempts=1`); a transient failure retries up to 3 attempts then succeeds; a transient failure
+  retries 3 times then gives up and logs failed; a real `SmtpProvider` connection failure (wrong
+  port) never leaks its configured password into the logged `error_summary`.
+- `packages/db`'s new `platform-rows.test.ts` (6, committed earlier): app role can insert but never
+  select a platform `audit_logs`/`email_logs` row; `withSystem()` can; `updatePlatformEmailLogStatus`
+  marks a platform row sent; tenant isolation on `email_logs`; the column-restricted `UPDATE` grant
+  actually rejects a disallowed column.
+- All Stage 0–1 tests still pass (see their own sections above).
+- CI: added a Mailpit service container (`axllent/mailpit:v1.33.0`, ports 1025/8025) so the real
+  SMTP integration test runs there too — same image/version as `docker-compose.yml`.
+
+### Check results
+
+- `pnpm lint` → 9/9 packages pass
+- `pnpm typecheck` → 9/9 pass
+- `pnpm test` → 9/9 suites, 79/79 tests total: `@ventidoc/db` 25 (19 from Stage 1 +
+  `platform-rows.test.ts`'s 6), `@ventidoc/emails` 37 (new), `@ventidoc/config` 8 (4 from Stage 1 +
+  4 discriminated-union tests), `web` 3, and 1 each for `auth`/`core`/`permissions`/`ui`, 2 for
+  `validation` (all unchanged from Stage 1)
+- `pnpm build` → pass
+- `pnpm test:e2e` → 2/2 pass
+
+### Deviations
+
+- `turbo.json`'s `test` task now declares `dependsOn: ["^test"]` and a longer `env` list
+  (`EMAIL_PROVIDER`/`SMTP_*`/`EMAIL_FROM`/`RESEND_API_KEY`/`APP_URL`, alongside the Stage 1
+  `DATABASE_*` ones). `@ventidoc/emails` shares the same Postgres test database as
+  `@ventidoc/db` (both read/write `email_logs`/`audit_logs` for their tests), and `@ventidoc/db`'s
+  test suite resets that database from scratch on every run — without the dependency, Turborepo
+  could run both packages' test tasks concurrently and race. `^test` makes any package wait for
+  its workspace dependencies' `test` tasks first, which naturally covers `@ventidoc/emails` (it
+  depends on `@ventidoc/db`) without hard-coding a package name.
+- Added `drizzle-orm` as a direct dependency of `packages/emails` (needed for the `eq()` helper
+  used when updating a tenant-owned `email_logs` row), and never added `@types/nodemailer` —
+  Nodemailer 10.5.0 ships its own TypeScript types natively, so the separate `@types` package
+  would be unnecessary.
+- The spec's "subject" isn't a `sendEmail()` parameter — each template has a fixed-ish subject
+  line (`render.ts`'s `subjectFor()`), parameterized by template props where it makes sense
+  (`Welcome`'s app name, `BusinessInvite`'s inviter/business name, `GenericNotification`'s own
+  `title`). A later stage can add an explicit `subject` override if a caller ever needs one.
+
+### Known issues / TODOs
+
+- `@react-email/components` (and its constituent per-component packages, e.g. `@react-email/text`,
+  `@react-email/button`) are flagged `deprecated: "Package no longer supported"` on npm, but
+  `react-email` (the CLI, same repo/release lineage) is not, and `@react-email/render` just
+  shipped `2.3.0` — this reads as an npm registry/organizational quirk rather than the library
+  being genuinely unmaintained, but worth rechecking before the next stage touches templates again.
+- Per-tenant SMTP settings, attachments, and a real durable job queue behind `enqueueEmail()` are
+  all explicitly out of scope for this stage (see the requirements above) and the "Deviations"
+  entry on `resolveEmailProvider`.
+- The GitGuardian "1 secret uncovered" finding from Stage 1's PR is still unresolved (the user
+  chose to proceed past it; likely the already-documented local-dev Postgres credentials, but not
+  confirmed against the actual dashboard finding).

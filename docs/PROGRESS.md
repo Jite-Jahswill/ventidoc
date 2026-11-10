@@ -379,3 +379,29 @@ in-memory fixture, no file written to disk):
 - CI's Postgres service container runs on port 5432 inside the isolated runner (no conflict
   there); the local port-5433 workaround from Stage 0.1 only applies to this developer's
   machine.
+
+### CI-only bug found and fixed: `vitest` 5.0.5 → 5.1.0
+
+CI had never actually run against this branch before (the workflow only triggers on push to
+`main` or on a `pull_request`, and the Stage 1 commits were only ever pushed directly). Opening
+the first PR for this branch surfaced a real failure that local development on macOS never hit:
+`@ventidoc/db`'s test run failed with a misleading `No test files found, exiting with code 1`
+plus a `TypeError: code.charCodeAt is not a function` inside Vite's module runner
+(`extractInlineSourceMap`).
+
+Bisected (in a Linux container matching CI's exact Node 24.22.2, reproducible, not caused by
+any of this session's own changes — the same crash reproduces at the original Stage 1 commit
+too) down to `vitest@5.0.5` + `vite@8.3.5`: when `globalSetup` (`vitest.global-setup.ts`, which
+calls `resetDatabase()`) throws, that version combination crashes while trying to pretty-print
+the error's stack trace via a broken source-map lookup, on Linux + Node 24.22.x specifically
+(never reproduces on macOS). The crash swallows the real underlying error and prints the
+unrelated "no test files found" message instead. Upgrading `vitest` to `5.1.0` (`vite` stays at
+`8.3.5`) fixes the crash and lets the real error surface normally; confirmed with a minimal
+repro (a `globalSetup` that calls `resetDatabase()` against a non-local hostname) going from an
+opaque crash under 5.0.5 to a clean, readable `Error: db:reset refuses to run against a
+non-local host (...)` under 5.1.0.
+
+Also removed a bare top-level `await` from `reset.ts`'s and `seed.ts`'s CLI entry points (now a
+`.then()/.catch()` chain) — this turned out not to be the cause of the crash above, but it's a
+real portability hazard in its own right (some esbuild/Vite transform paths reject top-level
+await when a module gets compiled to CommonJS output), so it's fixed regardless.

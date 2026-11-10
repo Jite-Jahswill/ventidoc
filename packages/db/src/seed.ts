@@ -64,10 +64,17 @@ async function seed(): Promise<void> {
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 
+// No top-level `await` here — see the comment in reset.ts for why.
 if (isMain) {
-  await seed();
-  // The app/owner connection pools (packages/db/src/client.ts) stay open
-  // for reuse; this is a one-shot script, so exit explicitly instead of
-  // leaving Node waiting on their idle sockets forever.
-  process.exit(0);
+  seed()
+    .then(() => {
+      // The app/owner connection pools (packages/db/src/client.ts) stay open
+      // for reuse; this is a one-shot script, so exit explicitly instead of
+      // leaving Node waiting on their idle sockets forever.
+      process.exit(0);
+    })
+    .catch((error: unknown) => {
+      console.error(error);
+      process.exit(1);
+    });
 }

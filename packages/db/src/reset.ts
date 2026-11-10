@@ -41,11 +41,23 @@ export async function resetDatabase(migrationUrl: string): Promise<void> {
 
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 
+// No top-level `await` here: on some esbuild/Vite transform paths (notably
+// Vitest's globalSetup loading under Node 24.x on Linux), a module with a
+// top-level await gets rejected with "Top-level await is currently not
+// supported with the 'cjs' output format" — which Vitest then mis-reports as
+// "No test files found" instead of surfacing the real error. A `.then()`
+// chain avoids the whole class of problem.
 if (isMain) {
   const url = process.env.DATABASE_MIGRATION_URL;
   if (!url) {
     throw new Error('DATABASE_MIGRATION_URL is required to run db:reset');
   }
-  await resetDatabase(url);
-  console.log(`Reset and migrated ${new URL(url).pathname.slice(1)}.`);
+  resetDatabase(url)
+    .then(() => {
+      console.log(`Reset and migrated ${new URL(url).pathname.slice(1)}.`);
+    })
+    .catch((error: unknown) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
 }

@@ -236,6 +236,11 @@ role and sets `app.tenant_id` for its duration; `withSystem(fn)` opens a transac
 owner role (bypasses RLS) for seeds, migrations and tests only. Neither the raw Drizzle client
 nor the connection pools are exported from the package.
 
+`withSystem` is exported only from a separate subpath, `@ventidoc/db/system`
+(`packages/db/src/system.ts`, wired up via `package.json#exports`) — not from the package's
+main entry point. An ESLint rule (`no-restricted-imports`, scoped to `apps/web/**` in the root
+`eslint.config.mjs`) fails lint on any `apps/web` file that imports `@ventidoc/db/system`.
+
 ### Schema overview
 
 | Table            | Columns (beyond id/timestamps)                                                                                                                                                        | Notes                                                                                              |
@@ -325,18 +330,29 @@ fixtures.)
   - never leaks rows across 20+ concurrent withTenant calls for two tenants
 - `pooled-connection.test.ts`
   - resets to unset between transactions on the same connection (asserts same `pg_backend_pid()` throughout)
+  - resets to unset after a transaction rolls back (callback throws), not just on commit —
+    same mechanism as above, proven on the rollback path specifically
 - `grants.test.ts`
   - cannot ALTER TABLE / cannot DISABLE ROW LEVEL SECURITY / cannot UPDATE audit_logs / cannot DELETE from audit_logs
   - can INSERT and SELECT on audit_logs (append-only, not locked out)
   - is not the owner of any table
+- `with-tenant.test.ts`
+  - rejects an invalid tenant id
+  - propagates an error thrown by the callback (rolls back instead of swallowing it)
 - `id.test.ts` — UUIDv7 format, uniqueness, monotonic ordering
+
+And in `apps/web/app/__tests__/db-system-import.test.ts` (runs ESLint's Node API against an
+in-memory fixture, no file written to disk):
+
+- fails lint on an import of `@ventidoc/db/system`
+- does not flag importing the tenant-scoped `@ventidoc/db` entry point
 
 ### Check results
 
 - `pnpm lint` → **9/9 packages pass**
 - `pnpm typecheck` → **9/9 pass**
-- `pnpm test` → **9/9 suites pass, 29/29 tests pass** (13 from Stage 0 + 16 new: 6 isolation + 1
-  pooled-connection + 6 grants + 3 id)
+- `pnpm test` → **9/9 suites pass, 34/34 tests pass** (13 from Stage 0 + 21 new: 6 isolation + 2
+  pooled-connection + 6 grants + 2 with-tenant + 3 id + 2 apps/web lint-boundary)
 - `pnpm build` → **pass**
 - `pnpm test:e2e` → **2/2 pass**
 

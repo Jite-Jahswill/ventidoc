@@ -20,7 +20,8 @@
     "db:generate": "pnpm --filter @ventidoc/db db:generate",
     "db:migrate": "pnpm --filter @ventidoc/db db:migrate",
     "db:seed": "pnpm --filter @ventidoc/db db:seed",
-    "db:reset": "pnpm --filter @ventidoc/db db:reset"
+    "db:reset": "pnpm --filter @ventidoc/db db:reset",
+    "email:dev": "pnpm --filter @ventidoc/emails email:dev"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

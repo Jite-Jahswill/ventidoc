@@ -7,43 +7,40 @@ const booleanFromString = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
-const envSchema = z
-  .object({
-    DATABASE_URL: z.url(),
-    DATABASE_URL_TEST: z.url(),
-    DATABASE_MIGRATION_URL: z.url(),
-    DATABASE_MIGRATION_URL_TEST: z.url(),
-    APP_URL: z.url(),
-    EMAIL_PROVIDER: z.enum(['smtp', 'resend']).default('smtp'),
-    SMTP_HOST: z.string().min(1).optional(),
-    SMTP_PORT: z.coerce.number().int().positive().optional(),
-    SMTP_USER: z.string().optional(),
-    SMTP_PASS: z.string().optional(),
-    SMTP_SECURE: booleanFromString.optional(),
-    EMAIL_FROM: z.string().min(1),
-    RESEND_API_KEY: z.string().optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (value.EMAIL_PROVIDER === 'smtp' && !value.SMTP_HOST) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['SMTP_HOST'],
-        message: 'SMTP_HOST is required when EMAIL_PROVIDER=smtp',
-      });
-    }
-    if (value.EMAIL_PROVIDER === 'resend' && !value.RESEND_API_KEY) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['RESEND_API_KEY'],
-        message: 'RESEND_API_KEY is required when EMAIL_PROVIDER=resend',
-      });
-    }
-  });
+const baseEnvSchema = z.object({
+  DATABASE_URL: z.url(),
+  DATABASE_URL_TEST: z.url(),
+  DATABASE_MIGRATION_URL: z.url(),
+  DATABASE_MIGRATION_URL_TEST: z.url(),
+  APP_URL: z.url(),
+});
+
+/** Mailpit needs no auth locally, so SMTP_USER/SMTP_PASS stay optional. */
+const smtpEnvSchema = z.object({
+  EMAIL_PROVIDER: z.literal('smtp'),
+  SMTP_HOST: z.string().min(1),
+  SMTP_PORT: z.coerce.number().int().positive(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_SECURE: booleanFromString.optional().default(false),
+  EMAIL_FROM: z.string().min(1),
+});
+
+const resendEnvSchema = z.object({
+  EMAIL_PROVIDER: z.literal('resend'),
+  RESEND_API_KEY: z.string().min(1),
+  EMAIL_FROM: z.string().min(1),
+});
+
+const emailEnvSchema = z.discriminatedUnion('EMAIL_PROVIDER', [smtpEnvSchema, resendEnvSchema]);
+
+const envSchema = z.intersection(baseEnvSchema, emailEnvSchema);
 
 export type Env = z.infer<typeof envSchema>;
 
 export function parseEnv(source: Record<string, string | undefined> = process.env): Env {
-  const result = envSchema.safeParse(source);
+  const withDefaultProvider = { EMAIL_PROVIDER: 'smtp', ...source };
+  const result = envSchema.safeParse(withDefaultProvider);
 
   if (!result.success) {
     const issues = result.error.issues

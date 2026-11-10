@@ -16,7 +16,13 @@
       "outputs": []
     },
     "test": {
-      "outputs": []
+      "outputs": [],
+      "env": [
+        "DATABASE_URL",
+        "DATABASE_URL_TEST",
+        "DATABASE_MIGRATION_URL",
+        "DATABASE_MIGRATION_URL_TEST"
+      ]
     },
     "test:e2e": {
       "dependsOn": ["build"],

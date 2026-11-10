@@ -405,3 +405,17 @@ Also removed a bare top-level `await` from `reset.ts`'s and `seed.ts`'s CLI entr
 `.then()/.catch()` chain) — this turned out not to be the cause of the crash above, but it's a
 real portability hazard in its own right (some esbuild/Vite transform paths reject top-level
 await when a module gets compiled to CommonJS output), so it's fixed regardless.
+
+### Second CI-only bug found and fixed: `turbo.json`'s `test` task didn't declare its env vars
+
+With the `vitest` crash above fixed, CI's real error came through cleanly:
+`DATABASE_MIGRATION_URL_TEST is required to run packages/db tests`, even though the workflow's
+`env:` block sets it. Reproduced locally (not CI-specific) by removing the local `.env` file and
+running `pnpm test --filter=@ventidoc/db` with the four `DATABASE_*` vars exported in the shell
+instead — it fails identically. Local development had masked this the whole time because
+`packages/db`'s `test` script loads a committed `.env` file directly via Node's own
+`--env-file-if-exists` flag, which works regardless of what Turborepo forwards; CI has no `.env`
+file, so it depends entirely on Turborepo actually passing these vars through to the task.
+
+Fix: declare the four `DATABASE_*` vars under `tasks.test.env` in `turbo.json`. Confirmed fixed
+with the same no-`.env`-file repro.

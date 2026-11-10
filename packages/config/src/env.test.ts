@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { parseEnv } from './env';
 
 const validEnv = {
-  DATABASE_URL: 'postgresql://ventidoc:ventidoc@localhost:5432/ventidoc',
-  DATABASE_URL_TEST: 'postgresql://ventidoc:ventidoc@localhost:5432/ventidoc_test',
+  DATABASE_URL: 'postgresql://ventidoc_app:ventidoc_app@localhost:5433/ventidoc',
+  DATABASE_URL_TEST: 'postgresql://ventidoc_app:ventidoc_app@localhost:5433/ventidoc_test',
+  DATABASE_MIGRATION_URL: 'postgresql://ventidoc_owner:ventidoc_owner@localhost:5433/ventidoc',
+  DATABASE_MIGRATION_URL_TEST:
+    'postgresql://ventidoc_owner:ventidoc_owner@localhost:5433/ventidoc_test',
   APP_URL: 'http://localhost:3000',
   EMAIL_PROVIDER: 'smtp',
   SMTP_HOST: 'localhost',

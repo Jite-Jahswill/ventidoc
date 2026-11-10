@@ -1,5 +1,4 @@
-export const PACKAGE_NAME = '@ventidoc/db';
-
-export function placeholder(): string {
-  return `${PACKAGE_NAME} placeholder — Drizzle schema, migrations and RLS policies land in Stage 1`;
-}
+export { generateId } from './id';
+export { auditLogs, shops, tenantMembers, tenants, users } from './schema';
+export { withTenant } from './with-tenant';
+export type { TenantTransaction } from './with-tenant';

@@ -213,3 +213,209 @@ typescript-eslint versions` and there is no newer major that supports TS 7 yet.
 - Mailpit's web UI responds `HTTP 200` at `http://localhost:8025` (API reports
   `"Version":"v1.33.0"`, matching the pinned image, 0 messages as expected with no emails
   sent yet).
+
+## Stage 1 — Database foundation & tenant isolation
+
+**Status:** done. Full suite green (lint, typecheck, unit tests including the isolation
+suite, build, e2e).
+
+### Summary
+
+Drizzle ORM + `postgres` (postgres.js) in `packages/db`, with migrations tracked by
+drizzle-kit. Two Postgres roles — `ventidoc_owner` (owns every table, bypasses RLS, used only
+for migrations/seeds/tests) and `ventidoc_app` (no DDL rights, not a table owner, cannot
+bypass RLS, used at runtime) — are created once by `docker/init/00-bootstrap.sh`, which runs
+automatically in local dev (via `docker-entrypoint-initdb.d`) and as an explicit CI step. Four
+tables (`tenants`, `shops`, `tenant_members`, `audit_logs`) have Postgres Row-Level Security
+**enabled and forced**, so even a query that forgets a `WHERE tenant_id = ...` clause gets zero
+rows back from the database itself, not just from application code. `users` has no RLS yet —
+documented below.
+
+The public API is two functions: `withTenant(tenantId, fn)` opens a transaction on the app
+role and sets `app.tenant_id` for its duration; `withSystem(fn)` opens a transaction on the
+owner role (bypasses RLS) for seeds, migrations and tests only. Neither the raw Drizzle client
+nor the connection pools are exported from the package.
+
+`withSystem` is exported only from a separate subpath, `@ventidoc/db/system`
+(`packages/db/src/system.ts`, wired up via `package.json#exports`) — not from the package's
+main entry point. An ESLint rule (`no-restricted-imports`, scoped to `apps/web/**` in the root
+`eslint.config.mjs`) fails lint on any `apps/web` file that imports `@ventidoc/db/system`.
+
+### Schema overview
+
+| Table            | Columns (beyond id/timestamps)                                                                                                                                                        | Notes                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `users`          | `email` (unique), `name`, `status`                                                                                                                                                    | Global identity, no `tenant_id`, no RLS — access goes only through the auth layer built in Stage 3 |
+| `tenants`        | `name`, `slug` (unique), `status`, `owner_user_id` → `users.id`                                                                                                                       | Tenant-scoped rows match on the tenant's own `id`                                                  |
+| `shops`          | `tenant_id` → `tenants.id`, `name`, `address`, `timezone`, `status`                                                                                                                   | Soft-deletable (`deleted_at`)                                                                      |
+| `tenant_members` | `tenant_id` → `tenants.id`, `user_id` → `users.id`, `status`                                                                                                                          | Unique on `(tenant_id, user_id)`; soft-deletable                                                   |
+| `audit_logs`     | `tenant_id` (nullable, for Stage 5+ platform events) → `tenants.id`, `actor_user_id` → `users.id`, `action`, `entity_type`, `entity_id`, `before`/`after` (jsonb), `ip`, `user_agent` | Append-only — `ventidoc_app` gets INSERT + SELECT only, never UPDATE/DELETE                        |
+
+All primary keys are UUIDv7, generated in the app via the `uuidv7` package (`generateId()`),
+never by the database.
+
+### RLS policies
+
+One `FOR ALL` policy per table (`USING` + `WITH CHECK`, so a row can't be read, updated,
+deleted, _or inserted_ for another tenant):
+
+- `tenants_isolation` — `id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`
+- `shops_isolation` — `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`
+- `tenant_members_isolation` — same predicate as `shops_isolation`
+- `audit_logs_isolation` — same predicate; a `NULL` `tenant_id` (platform event) never equals
+  a set tenant id, so platform events stay invisible to every tenant-scoped session
+
+All four tables have both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` — FORCE
+matters because `ventidoc_owner` owns every table, and ENABLE alone would exempt the owner.
+(`withSystem()`'s owner-role connection still bypasses RLS entirely, because the role itself
+has the `BYPASSRLS` attribute — that's deliberate, so seeds/tests can set up cross-tenant
+fixtures.)
+
+### Decisions
+
+- **postgres.js over node-postgres.** Its `sql.begin()`/Drizzle's `db.transaction()` API maps
+  directly onto "open a transaction, run one `set_config` call, run the caller's queries,
+  commit" with no extra ceremony, and it's a common pairing with Drizzle for exactly this
+  pooled-connection-with-per-transaction-context pattern (the blueprint's own "serverless +
+  Postgres needs pooling" caveat).
+- **RLS policies and grants are a hand-written custom migration (`0001_rls_and_grants.sql`),
+  not Drizzle's native `pgPolicy()`/`.enableRLS()` schema API.** Drizzle-kit's generated
+  `ENABLE ROW LEVEL SECURITY` doesn't include `FORCE`, which this stage requires, so a custom
+  migration was needed regardless; keeping the whole security-critical surface (RLS + grants)
+  as one reviewable SQL file was preferred over splitting it between TypeScript decorators and
+  raw SQL.
+- **`ventidoc_owner` owns the _database_, not just the `public` schema.** Postgres 15+ doesn't
+  grant `CREATE` on `public` to new roles by default; schema ownership alone lets
+  `ventidoc_owner` create tables, but drizzle-kit's migrator also needs to create its own
+  `drizzle` schema for migration tracking, which needs database-level `CREATE`. (This is also
+  why `drizzle-kit migrate` failed silently with no error message the first time — the
+  underlying "permission denied for database" error wasn't being surfaced by its spinner UI;
+  confirmed by reproducing the failure with a raw `psql` command.)
+- **Scripts invoke the installed packages' actual entry files directly**
+  (`node_modules/drizzle-kit/bin.cjs`, `node_modules/vitest/vitest.mjs`,
+  `node_modules/tsx/dist/cli.mjs`) instead of their `node_modules/.bin/*` shims, combined with
+  `node --env-file-if-exists=../../.env`. The `.bin` shims are POSIX shell scripts, not
+  JavaScript, so `node <shim>` fails with a syntax error; the package's own declared `bin`
+  entry point is always plain JS and works with this pattern. `--env-file-if-exists` (not
+  `--env-file`) so the same script works locally (loads `.env` if present) and in CI (no
+  `.env` file; env vars are already injected by the workflow).
+- **Vitest setup remaps `DATABASE_URL`/`DATABASE_MIGRATION_URL` to the `_TEST` variants**
+  (`packages/db/vitest.setup.ts`) rather than giving `withTenant`/`withSystem` a
+  test-specific entry point, so the exact same functions under test are what the rest of the
+  app will use. `fileParallelism: false` for this package only, since its tests share one real
+  Postgres database and a `globalSetup` (`vitest.global-setup.ts`) resets and re-migrates it
+  from scratch once before the whole suite, per the stage's "migrated fresh before the suite"
+  requirement.
+- **The pooled-connection leak test uses its own dedicated `{ max: 1 }` postgres.js client**,
+  independent of the package's shared pool, so "same physical connection reused" is
+  deterministic regardless of what other tests in the suite have done to the shared pool's
+  size. It also demonstrates something worth knowing: `current_setting(name, true)` returns
+  `NULL` for a custom GUC that's never been touched in the session, but `''` (empty string)
+  once it has been set transaction-locally and that transaction has ended — never back to
+  `NULL`. That's exactly why the RLS policies normalise with `NULLIF(..., '')` rather than
+  comparing to `NULL` directly.
+- **Permission-denial tests assert on Postgres SQLSTATE `42501`** (`insufficient_privilege`)
+  via the driver error's `.cause.code`, not on message text — Postgres phrases ownership
+  violations ("must be owner of table ...") differently from missing-grant violations
+  ("permission denied for table ..."), but both carry the same SQLSTATE.
+
+### Isolation test names (`packages/db`, `src/__tests__/`)
+
+- `tenant-isolation.test.ts`
+  - returns 0 rows when no tenant context is set
+  - sees only its own tenant, shops, members and audit logs under tenant A's context
+  - rejects inserting a shop stamped with tenant B's id under tenant A's context
+  - affects 0 rows updating tenant B's shop under tenant A's context
+  - affects 0 rows deleting tenant B's shop under tenant A's context
+  - never leaks rows across 20+ concurrent withTenant calls for two tenants
+- `pooled-connection.test.ts`
+  - resets to unset between transactions on the same connection (asserts same `pg_backend_pid()` throughout)
+  - resets to unset after a transaction rolls back (callback throws), not just on commit —
+    same mechanism as above, proven on the rollback path specifically
+- `grants.test.ts`
+  - cannot ALTER TABLE / cannot DISABLE ROW LEVEL SECURITY / cannot UPDATE audit_logs / cannot DELETE from audit_logs
+  - can INSERT and SELECT on audit_logs (append-only, not locked out)
+  - is not the owner of any table
+- `with-tenant.test.ts`
+  - rejects an invalid tenant id
+  - propagates an error thrown by the callback (rolls back instead of swallowing it)
+- `id.test.ts` — UUIDv7 format, uniqueness, monotonic ordering
+
+And in `apps/web/app/__tests__/db-system-import.test.ts` (runs ESLint's Node API against an
+in-memory fixture, no file written to disk):
+
+- fails lint on an import of `@ventidoc/db/system`
+- does not flag importing the tenant-scoped `@ventidoc/db` entry point
+
+### Check results
+
+- `pnpm lint` → **9/9 packages pass**
+- `pnpm typecheck` → **9/9 pass**
+- `pnpm test` → **9/9 suites pass, 34/34 tests pass** (13 from Stage 0 + 21 new: 6 isolation + 2
+  pooled-connection + 6 grants + 2 with-tenant + 3 id + 2 apps/web lint-boundary)
+- `pnpm build` → **pass**
+- `pnpm test:e2e` → **2/2 pass**
+
+### Deviations
+
+- Added `DATABASE_MIGRATION_URL` **and** `DATABASE_MIGRATION_URL_TEST` (the spec only
+  mentioned `DATABASE_MIGRATION_URL`) — the test suite needs an owner-role connection to the
+  _test_ database for `withSystem()`/migrations/reset, exactly parallel to the existing
+  `DATABASE_URL`/`DATABASE_URL_TEST` pair.
+- `db:reset` refuses to run against any host other than `localhost`/`127.0.0.1` (reads the
+  target URL's hostname) rather than branching on a "dev vs test" flag — simpler, and it's the
+  actual safety property the requirement cares about.
+- Local dev's Postgres container had to be recreated (`docker compose down -v`) for the new
+  init script to run, since `docker-entrypoint-initdb.d` only runs against a fresh data
+  volume. The Stage 0.1 volume only ever held an empty dev database, so this was safe.
+
+### Known issues / TODOs
+
+- `drizzle-kit migrate`'s CLI swallows errors silently (spinner UI exits with code 1 and no
+  message) — worth remembering if a future migration fails for a different reason; reproduce
+  with a raw `psql`/`postgres.js` call against the same URL to see the real error.
+- No tests yet exercise `packages/db` from `apps/web` — that wiring is Stage-later scope, not
+  Stage 1 (the web app's health endpoint still doesn't touch the database).
+- CI's Postgres service container runs on port 5432 inside the isolated runner (no conflict
+  there); the local port-5433 workaround from Stage 0.1 only applies to this developer's
+  machine.
+
+### CI-only bug found and fixed: `vitest` 5.0.5 → 5.1.0
+
+CI had never actually run against this branch before (the workflow only triggers on push to
+`main` or on a `pull_request`, and the Stage 1 commits were only ever pushed directly). Opening
+the first PR for this branch surfaced a real failure that local development on macOS never hit:
+`@ventidoc/db`'s test run failed with a misleading `No test files found, exiting with code 1`
+plus a `TypeError: code.charCodeAt is not a function` inside Vite's module runner
+(`extractInlineSourceMap`).
+
+Bisected (in a Linux container matching CI's exact Node 24.22.2, reproducible, not caused by
+any of this session's own changes — the same crash reproduces at the original Stage 1 commit
+too) down to `vitest@5.0.5` + `vite@8.3.5`: when `globalSetup` (`vitest.global-setup.ts`, which
+calls `resetDatabase()`) throws, that version combination crashes while trying to pretty-print
+the error's stack trace via a broken source-map lookup, on Linux + Node 24.22.x specifically
+(never reproduces on macOS). The crash swallows the real underlying error and prints the
+unrelated "no test files found" message instead. Upgrading `vitest` to `5.1.0` (`vite` stays at
+`8.3.5`) fixes the crash and lets the real error surface normally; confirmed with a minimal
+repro (a `globalSetup` that calls `resetDatabase()` against a non-local hostname) going from an
+opaque crash under 5.0.5 to a clean, readable `Error: db:reset refuses to run against a
+non-local host (...)` under 5.1.0.
+
+Also removed a bare top-level `await` from `reset.ts`'s and `seed.ts`'s CLI entry points (now a
+`.then()/.catch()` chain) — this turned out not to be the cause of the crash above, but it's a
+real portability hazard in its own right (some esbuild/Vite transform paths reject top-level
+await when a module gets compiled to CommonJS output), so it's fixed regardless.
+
+### Second CI-only bug found and fixed: `turbo.json`'s `test` task didn't declare its env vars
+
+With the `vitest` crash above fixed, CI's real error came through cleanly:
+`DATABASE_MIGRATION_URL_TEST is required to run packages/db tests`, even though the workflow's
+`env:` block sets it. Reproduced locally (not CI-specific) by removing the local `.env` file and
+running `pnpm test --filter=@ventidoc/db` with the four `DATABASE_*` vars exported in the shell
+instead — it fails identically. Local development had masked this the whole time because
+`packages/db`'s `test` script loads a committed `.env` file directly via Node's own
+`--env-file-if-exists` flag, which works regardless of what Turborepo forwards; CI has no `.env`
+file, so it depends entirely on Turborepo actually passing these vars through to the task.
+
+Fix: declare the four `DATABASE_*` vars under `tasks.test.env` in `turbo.json`. Confirmed fixed
+with the same no-`.env`-file repro.

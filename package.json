@@ -16,7 +16,11 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:up": "docker compose up -d postgres mailpit",
-    "db:down": "docker compose down"
+    "db:down": "docker compose down",
+    "db:generate": "pnpm --filter @ventidoc/db db:generate",
+    "db:migrate": "pnpm --filter @ventidoc/db db:migrate",
+    "db:seed": "pnpm --filter @ventidoc/db db:seed",
+    "db:reset": "pnpm --filter @ventidoc/db db:reset"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
@@ -28,6 +32,6 @@
     "turbo": "2.11.10",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1",
-    "vitest": "5.0.5"
+    "vitest": "5.1.0"
   }
 }
